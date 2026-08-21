@@ -1,0 +1,295 @@
+#!/bin/sh
+. /usr/share/openclash/ruby.sh
+. /usr/share/openclash/log.sh
+. /lib/functions.sh
+
+SCRIPT_VERSION="v1.1.4"
+LOG_OUT "Tip: Start Running Custom Overwrite Scripts [Version: ${SCRIPT_VERSION}]..."
+LOGTIME=$(date "+%Y-%m-%d %H:%M:%S")
+LOG_FILE="/tmp/openclash.log"
+CONFIG_FILE="$1"
+
+# ===== 1. 填入你需要合并的第二个机场订阅地址 =====
+EXTRA_SUB_URL=""
+
+# ===== 规则集 URL =====
+DIRECT_RULESET_URL="https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/direct.txt"
+APPLE_RULESET_URL="https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/apple.txt"
+REJECT_RULESET_URL="https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/reject.txt"
+TG_RULESET_URL="https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/telegramcidr.txt"
+GFW_RULESET_URL="https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/gfw.txt"
+
+# ===== 确保 ruleset 目录存在 =====
+RULESET_DIR="/etc/openclash/ruleset"
+mkdir -p "$RULESET_DIR"
+
+# ===== 用 curl 预下载第二个订阅文件 =====
+EXTRA_SUB_FILE="/tmp/openclash_extra_sub.yaml"
+rm -f "$EXTRA_SUB_FILE"
+
+if [ -n "$EXTRA_SUB_URL" ]; then
+  LOG_OUT "Tip: Fetching extra subscription using curl..."
+  curl -sL --connect-timeout 10 -m 20 -A "ClashMeta" "$EXTRA_SUB_URL" -o "$EXTRA_SUB_FILE"
+fi
+
+ruby -r yaml -e '
+  begin
+    config_file = ARGV[0]
+    log_file = ARGV[1] || "/tmp/openclash.log"
+    extra_file = ARGV[2]
+    version = ARGV[8] || "v1.1.4"
+    config = YAML.load_file(config_file)
+
+    # ===== 0. 清理机场自带的 DNS 配置 =====
+    config.delete("dns")
+
+    # ===== 1. 全局参数优化 =====
+    config["udp-timeout"] = 30
+    config["keep-alive-interval"] = 15
+
+    # ===== 2. 解析第二机场节点 =====
+    config["proxies"] ||= []
+    extra_proxy_names = []
+
+    if File.exist?(extra_file) && File.size(extra_file) > 100
+      begin
+        extra_config = YAML.load_file(extra_file)
+        if extra_config && extra_config["proxies"].is_a?(Array)
+          existing_names = config["proxies"].map { |p| p["name"] }
+          extra_proxies = extra_config["proxies"].reject { |p| existing_names.include?(p["name"]) }
+          config["proxies"] += extra_proxies
+          extra_proxy_names = extra_proxies.map { |p| p["name"] }
+          puts "Successfully merged #{extra_proxies.size} proxies from second subscription."
+        end
+      rescue => sub_err
+        puts "Failed to parse extra subscription YAML: #{sub_err.message}"
+      end
+    end
+
+    all_proxies = config["proxies"].map { |p| p["name"] }
+    existing_groups = config["proxy-groups"] || []
+
+    # 找到机场原有的“自动选择”或“故障转移”组，将第二机场节点压入这些组里
+    existing_groups.each do |g|
+      if ["url-test", "fallback"].include?(g["type"]) || g["name"] =~ /自动|故障/
+        g["proxies"] = (g["proxies"] + extra_proxy_names).uniq
+      end
+    end
+
+    global_auto_group = existing_groups.find { |g| g["name"] == "自动选择" } || existing_groups.find { |g| g["type"] == "url-test" }
+    global_auto_name = global_auto_group ? global_auto_group["name"] : nil
+
+    # ===== 3. 只保留唯一一个 第二机场 自动选择组 =====
+    extra_select_groups = []
+    extra_auto_name = nil
+
+    if !extra_proxy_names.empty?
+      extra_auto_name = "✈️ 第二机场"
+      
+      extra_select_groups << {
+        "name"     => extra_auto_name,
+        "type"     => "url-test",
+        "url"      => "http://www.gstatic.com/generate_204",
+        "interval" => 300,
+        "tolerance"=> 50,
+        "proxies"  => extra_proxy_names
+      }
+    end
+
+    # ===== 4. 国家分组定义（全部 url-test 自动选优） =====
+    regions = [
+      { "name" => "🇺🇸 美国节点",   "keywords" => ["美", "us", "united states"] },
+      { "name" => "🇸🇬 新加坡节点", "keywords" => ["坡", "sg", "singapore"] },
+      { "name" => "🇯🇵 日本节点",   "keywords" => ["日", "jp", "japan", "东京", "大阪"] },
+      { "name" => "🇭🇰 香港节点",   "keywords" => ["港", "hk", "hong kong"] },
+      { "name" => "🇹🇼 台湾节点",   "keywords" => ["台", "tw", "taiwan"] }
+    ]
+
+    regional_select_groups = []
+    select_group_names = []
+
+    regions.each do |r|
+      matched = all_proxies.select do |p|
+        p_lower = p.downcase
+        r["keywords"].any? { |kw| p_lower.include?(kw.downcase) }
+      end
+      next if matched.empty?
+
+      # 国家分组统一使用 url-test 自动测试延迟并选优
+      regional_select_groups << {
+        "name"      => r["name"],
+        "type"      => "url-test",
+        "url"       => "http://www.gstatic.com/generate_204",
+        "interval"  => 300,
+        "tolerance" => 50,
+        "proxies"   => matched.dup
+      }
+
+      select_group_names << r["name"]
+    end
+
+    # ===== 5. 基础业务分组 =====
+    direct_group = {
+      "name"    => "🎯 直连",
+      "type"    => "select",
+      "proxies" => ["DIRECT"]
+    }
+
+    reject_group = {
+      "name"    => "🚫 广告拦截",
+      "type"    => "select",
+      "proxies" => ["REJECT", "DIRECT"]
+    }
+
+    # Telegram 组：包含 主机场自动选择 + 第二机场 + 国家组 + 全部节点 + DIRECT
+    telegram_proxies = []
+    telegram_proxies << global_auto_name if global_auto_name
+    telegram_proxies << extra_auto_name if extra_auto_name
+    telegram_proxies += select_group_names + all_proxies + ["DIRECT"]
+    telegram_proxies.uniq!
+    telegram_group = {
+      "name"    => "📱 Telegram",
+      "type"    => "select",
+      "proxies" => telegram_proxies.empty? ? ["DIRECT"] : telegram_proxies
+    }
+
+    # 🤖 个人 AI 组：严格只包含各个国家分组
+    ai_proxies = select_group_names.dup
+    ai_proxies.uniq!
+    ai_group = {
+      "name"    => "🤖 个人 AI",
+      "type"    => "select",
+      "proxies" => ai_proxies.empty? ? ["DIRECT"] : ai_proxies
+    }
+
+    # 清理脚本自定义组
+    script_custom_names = ["🤖 个人 AI", "🎯 直连", "📱 Telegram", "🚫 广告拦截", "✈️ 第二机场", "✈️ 第二机场 自动选择"] + 
+                          regional_select_groups.map { |g| g["name"] }
+    
+    config["proxy-groups"].delete_if { |g| script_custom_names.include?(g["name"]) }
+    
+    # 组装配置文件
+    config["proxy-groups"] = [reject_group, direct_group, telegram_group, ai_group] + extra_select_groups + regional_select_groups + config["proxy-groups"]
+
+    # ===== 6. 重新注入干净的 DNS 策略 =====
+    config["dns"] = {}
+    config["dns"]["nameserver-policy"] = {}
+    bing_domains = [
+      "+.bing.com", "+.bing.net", "+.bingapis.com", "+.bingj.com",
+      "+.microsoft.com", "+.microsoftonline.com", "+.live.com",
+      "+.outlook.com", "+.office.com", "+.office365.com",
+      "+.onedrive.com", "+.windows.com", "+.windowsupdate.com",
+      "+.msn.com", "+.msftncsi.com", "+.msftconnecttest.com",
+      "+.xbox.com", "+.xboxlive.com", "+.skype.com",
+      "+.azure.com", "+.azureedge.net", "+.visualstudio.com"
+    ]
+    bing_domains.each do |domain|
+      config["dns"]["nameserver-policy"][domain] = ["223.5.5.5", "119.29.29.29"]
+    end
+
+    # ===== 7. 规则设置 =====
+    config["rule-providers"] ||= {}
+
+    config["rule-providers"]["reject"] = {
+      "type"     => "http",
+      "behavior" => "domain",
+      "url"      => ARGV[3],
+      "path"     => "/etc/openclash/ruleset/reject.txt",
+      "interval" => 86400
+    }
+
+    direct_rulesets = {
+      "direct" => ARGV[4],
+      "apple"  => ARGV[5]
+    }
+
+    direct_rulesets.each do |name, url|
+      config["rule-providers"][name] = {
+        "type"     => "http",
+        "behavior" => "domain",
+        "url"      => url,
+        "path"     => "/etc/openclash/ruleset/#{name}.txt",
+        "interval" => 86400
+      }
+    end
+
+    config["rule-providers"]["telegramcidr"] = {
+      "type"     => "http",
+      "behavior" => "ipcidr",
+      "url"      => ARGV[6],
+      "path"     => "/etc/openclash/ruleset/telegramcidr.txt",
+      "interval" => 86400
+    }
+
+    config["rule-providers"]["gfw"] = {
+      "type"     => "http",
+      "behavior" => "domain",
+      "url"      => ARGV[7],
+      "path"     => "/etc/openclash/ruleset/gfw.txt",
+      "interval" => 86400
+    }
+
+    custom_rules = [
+      # ----- 微软直连 -----
+      "DOMAIN-KEYWORD,bing,🎯 直连",
+      "DOMAIN-SUFFIX,bing.com,🎯 直连",
+      "DOMAIN-SUFFIX,bing.net,🎯 直连",
+      "DOMAIN-SUFFIX,bingapis.com,🎯 直连",
+      "DOMAIN-SUFFIX,bingj.com,🎯 直连",
+      "DOMAIN-SUFFIX,bingads.microsoft.com,🎯 直连",
+      "DOMAIN-SUFFIX,edge.microsoft.com,🎯 直连",
+      "DOMAIN-SUFFIX,microsoft.com,🎯 直连",
+      "DOMAIN-SUFFIX,microsoftonline.com,🎯 直连",
+      "DOMAIN-SUFFIX,microsoft-edge.com,🎯 直连",
+      "DOMAIN-SUFFIX,windows.com,🎯 直连",
+      "DOMAIN-SUFFIX,windowsupdate.com,🎯 直连",
+      "DOMAIN-SUFFIX,office.com,🎯 直连",
+      "DOMAIN-SUFFIX,office365.com,🎯 直连",
+      "DOMAIN-SUFFIX,onedrive.com,🎯 直连",
+      "DOMAIN-SUFFIX,live.com,🎯 直连",
+      "DOMAIN-SUFFIX,outlook.com,🎯 直连",
+      "DOMAIN-SUFFIX,msn.com,🎯 直连",
+      "DOMAIN-SUFFIX,msftncsi.com,🎯 直连",
+      "DOMAIN-SUFFIX,msftconnecttest.com,🎯 直连",
+      "DOMAIN-SUFFIX,xbox.com,🎯 直连",
+      "DOMAIN-SUFFIX,xboxlive.com,🎯 直连",
+      "DOMAIN-SUFFIX,skype.com,🎯 直连",
+      "DOMAIN-SUFFIX,azure.com,🎯 直连",
+      "DOMAIN-SUFFIX,azureedge.net,🎯 直连",
+      "DOMAIN-SUFFIX,visualstudio.com,🎯 直连",
+      # ----- AI -----
+      "DOMAIN-SUFFIX,chatgpt.com,🤖 个人 AI",
+      "DOMAIN-SUFFIX,openai.com,🤖 个人 AI",
+      "DOMAIN-SUFFIX,claude.ai,🤖 个人 AI",
+      "DOMAIN-SUFFIX,gemini.google.com,🤖 个人 AI",
+      "DOMAIN-SUFFIX,deepseek.com,🤖 个人 AI",
+      "DOMAIN-SUFFIX,perplexity.ai,🤖 个人 AI",
+      "DOMAIN-SUFFIX,copilot.microsoft.com,🤖 个人 AI"
+    ]
+
+    reject_rules  = ["RULE-SET,reject,🚫 广告拦截"]
+    direct_rules  = direct_rulesets.keys.map { |name| "RULE-SET,#{name},🎯 直连" }
+    proxy_rules   = [
+      "RULE-SET,telegramcidr,📱 Telegram",
+      "RULE-SET,gfw,🤖 个人 AI"
+    ]
+    extra_rules   = [
+      "GEOIP,CN,🎯 直连",
+      "MATCH,🤖 个人 AI"
+    ]
+
+    config["rules"] = reject_rules + direct_rules + proxy_rules + custom_rules + extra_rules
+
+    File.write(config_file, config.to_yaml)
+    puts "Custom Overwrite [#{version}] Completed at #{Time.now}"
+  rescue => e
+    File.open(log_file, "a") { |f| f.puts "Ruby Error: #{e.message}\n#{e.backtrace.join("\n")}" }
+    raise
+  end
+' "$CONFIG_FILE" "$LOG_FILE" "$EXTRA_SUB_FILE" "$REJECT_RULESET_URL" "$DIRECT_RULESET_URL" "$APPLE_RULESET_URL" "$TG_RULESET_URL" "$GFW_RULESET_URL" "$SCRIPT_VERSION"
+
+# 清理临时文件
+rm -f "$EXTRA_SUB_FILE"
+
+LOG_OUT "Tip: Custom Overwrite Scripts [Version: ${SCRIPT_VERSION}] Executed Successfully!"
+exit 0

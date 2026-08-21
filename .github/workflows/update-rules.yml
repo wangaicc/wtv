@@ -1,0 +1,49 @@
+name: Fetch and Format Domain Rules
+
+on:
+  schedule:
+    # 每天 UTC 00:00 (北京时间 08:00) 自动运行
+    - cron: '30 17 * * *'
+  workflow_dispatch: # 支持手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch README and Extract Domains
+        run: |
+          # 1. 下载目标 README.md 内容
+          curl -sSL "https://raw.githubusercontent.com/feiniaoyun/feiniaoyun/refs/heads/main/README.md" -o raw_readme.md
+
+          # 2. 写入头部 payload:
+          echo "payload:" > direct.txt
+
+          # 3. 提取域名、去重，并格式化为  - '域名' 的样式追加写入
+          grep -oE 'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' raw_readme.md | \
+          sed -E 's|https?://||' | \
+          sed -E 's|/.*||' | \
+          sed -E 's|^www\.||' | \
+          sort -u | \
+          sed "s/^/  - '/; s/$/'/" >> direct.txt
+
+          # 清理临时文件
+          rm -f raw_readme.md
+
+      - name: Commit and Push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add direct.txt
+          if git diff --staged --quiet; then
+            echo "No changes in direct.txt, skipping commit."
+          else
+            git commit -m "Auto update direct.txt rules [skip ci]"
+            git push
+          fi

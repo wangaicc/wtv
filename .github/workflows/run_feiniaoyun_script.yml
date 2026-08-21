@@ -1,0 +1,44 @@
+name: Run Feiniaoyun Selenium Script
+
+on:
+  schedule:
+    - cron: '0 19 */2 * *'
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install selenium webdriver-manager
+
+    - name: Run Python Selenium Script
+      env:
+        APP_EMAIL: ${{ secrets.APP_EMAIL }}
+        APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+        APP_KEY: ${{ secrets.APP_KEY }}
+      run: python feiniaoyun.py
+
+    - name: Commit and Push to Repository
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add feiniaoyun/dy.txt
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update feiniaoyun/dy.txt" && git push)
+
+    - name: Upload subscribe link file
+      uses: actions/upload-artifact@v4
+      with:
+        name: subscribe-link-file
+        path: feiniaoyun/dy.txt
