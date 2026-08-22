@@ -3,14 +3,36 @@
 . /usr/share/openclash/log.sh
 . /lib/functions.sh
 
-SCRIPT_VERSION="v1.1.4"
+SCRIPT_VERSION="v1.2.3"
 LOG_OUT "Tip: Start Running Custom Overwrite Scripts [Version: ${SCRIPT_VERSION}]..."
 LOGTIME=$(date "+%Y-%m-%d %H:%M:%S")
 LOG_FILE="/tmp/openclash.log"
 CONFIG_FILE="$1"
 
+# ===== 0. OpenWrt 系统内核参数与 Conntrack 优化 =====
+apply_sysctl_param() {
+  key="$1"
+  val="$2"
+  sysctl -w "${key}=${val}" >/dev/null 2>&1
+  if grep -q "^${key}" /etc/sysctl.conf; then
+    sed -i "s|^${key}.*|${key} = ${val}|g" /etc/sysctl.conf
+  else
+    echo "${key} = ${val}" >> /etc/sysctl.conf
+  fi
+}
+
+modprobe nf_conntrack >/dev/null 2>&1
+
+apply_sysctl_param "net.ipv4.ip_local_port_range" "1024 65535"
+apply_sysctl_param "net.ipv4.tcp_tw_reuse" "1"
+apply_sysctl_param "net.netfilter.nf_conntrack_udp_timeout" "10"
+apply_sysctl_param "net.netfilter.nf_conntrack_udp_timeout_stream" "60"
+apply_sysctl_param "net.netfilter.nf_conntrack_max" "65536"
+
+LOG_OUT "Tip: OpenWrt kernel & conntrack parameters optimized."
+
 # ===== 1. 填入你需要合并的第二个机场订阅地址 =====
-EXTRA_SUB_URL=""
+EXTRA_SUB_URL="https://jsjc.cfd/api/v1/client/subscribe?token=e20acf85c4ef4e908679548712ee3734"
 
 # ===== 规则集 URL =====
 DIRECT_RULESET_URL="https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/direct.txt"
@@ -37,15 +59,16 @@ ruby -r yaml -e '
     config_file = ARGV[0]
     log_file = ARGV[1] || "/tmp/openclash.log"
     extra_file = ARGV[2]
-    version = ARGV[8] || "v1.1.4"
+    version = ARGV[8] || "v1.2.3"
     config = YAML.load_file(config_file)
 
-    # ===== 0. 清理机场自带的 DNS 配置 =====
+    # ===== 0. 清理机场订阅自带的旧 DNS 字段，确保无残留冲突 =====
     config.delete("dns")
 
-    # ===== 1. 全局参数优化 =====
+    # ===== 1. Clash 全局及 UDP 参数优化 =====
     config["udp-timeout"] = 30
     config["keep-alive-interval"] = 15
+    config["geodata-mode"] = true
 
     # ===== 2. 解析第二机场节点 =====
     config["proxies"] ||= []
@@ -115,7 +138,6 @@ ruby -r yaml -e '
       end
       next if matched.empty?
 
-      # 国家分组统一使用 url-test 自动测试延迟并选优
       regional_select_groups << {
         "name"      => r["name"],
         "type"      => "url-test",
@@ -171,21 +193,50 @@ ruby -r yaml -e '
     # 组装配置文件
     config["proxy-groups"] = [reject_group, direct_group, telegram_group, ai_group] + extra_select_groups + regional_select_groups + config["proxy-groups"]
 
-    # ===== 6. 重新注入干净的 DNS 策略 =====
-    config["dns"] = {}
-    config["dns"]["nameserver-policy"] = {}
-    bing_domains = [
-      "+.bing.com", "+.bing.net", "+.bingapis.com", "+.bingj.com",
-      "+.microsoft.com", "+.microsoftonline.com", "+.live.com",
-      "+.outlook.com", "+.office.com", "+.office365.com",
-      "+.onedrive.com", "+.windows.com", "+.windowsupdate.com",
-      "+.msn.com", "+.msftncsi.com", "+.msftconnecttest.com",
-      "+.xbox.com", "+.xboxlive.com", "+.skype.com",
-      "+.azure.com", "+.azureedge.net", "+.visualstudio.com"
-    ]
-    bing_domains.each do |domain|
-      config["dns"]["nameserver-policy"][domain] = ["223.5.5.5", "119.29.29.29"]
-    end
+    # ===== 6. 注入指定的标准 Fake-IP DNS 策略 =====
+    config["dns"] = {
+      "enable"                  => true,
+      "ipv6"                    => false,
+      "respect-rules"           => true,
+      "listen"                  => "0.0.0.0:7874",
+      "enhanced-mode"           => "fake-ip",
+      "fake-ip-range"           => "198.18.0.1/16",
+      "use-hosts"               => true,
+      "fake-ip-filter-mode"     => "blacklist",
+      "default-nameserver"      => [
+        "114.114.114.114",
+        "119.29.29.29",
+        "223.5.5.5",
+        "192.168.8.1",
+        "8.8.4.4"
+      ],
+      "proxy-server-nameserver" => [
+        "https://dns.alidns.com/dns-query",
+        "https://doh.pub/dns-query",
+        "tls://dot.pub"
+      ],
+      "nameserver"              => [
+        "223.5.5.5",
+        "119.29.29.29",
+        "192.168.8.1"
+      ],
+      "fallback"                => [
+        "8.8.4.4",
+        "https://dns.google/dns-query",
+        "https://dns.cloudflare.com/dns-query"
+      ],
+      "fallback-filter"         => {
+        "geoip" => true,
+        "ipcidr" => [
+          "240.0.0.0/4",
+          "0.0.0.0/32"
+        ]
+      },
+      "fake-ip-filter"          => [
+        "*.lan",
+        "localhost.ptlogin2.qq.com"
+      ]
+    }
 
     # ===== 7. 规则设置 =====
     config["rule-providers"] ||= {}
@@ -230,6 +281,11 @@ ruby -r yaml -e '
     }
 
     custom_rules = [
+      # ----- BT/PT 下载常见端口直连 -----
+      "DST-PORT,51413,🎯 直连",
+      "DST-PORT,6881-6889,🎯 直连",
+      "PROCESS-NAME,transmission-daemon,🎯 直连",
+      "PROCESS-NAME,aria2c,🎯 直连",
       # ----- 微软直连 -----
       "DOMAIN-KEYWORD,bing,🎯 直连",
       "DOMAIN-SUFFIX,bing.com,🎯 直连",
