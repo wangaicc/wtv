@@ -34,11 +34,11 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add feiniaoyun/dy.txt
-        git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update feiniaoyun/dy.txt" && git push)
+        git add feiniaoyun/
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update feiniaoyun subscription and logs" && git push)
 
     - name: Upload subscribe link file
       uses: actions/upload-artifact@v4
       with:
         name: subscribe-link-file
-        path: feiniaoyun/dy.txt
+        path: feiniaoyun/
