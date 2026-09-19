@@ -1,0 +1,48 @@
+name: Scheduled Site Ping
+
+on:
+  schedule:
+    - cron: '0 0 */2 * *'
+  workflow_dispatch:
+
+jobs:
+  ping-websites:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check URLs Availability
+        run: |
+          URLS=(
+            "https://www.zjdhh.com"
+            "https://www.zjdhh.com/product/"
+            "https://www.zjdhh.com/serial"
+          )
+
+          USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+          FAIL_COUNT=0
+
+          echo "=== 开始请求站点 ==="
+          for url in "${URLS[@]}"; do
+            echo -n "正在请求: $url ... "
+            
+            HTTP_CODE=$(curl -s -o /dev/null -L -w "%{http_code}" \
+              -A "$USER_AGENT" \
+              --connect-timeout 10 \
+              --max-time 15 \
+              "$url")
+
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+              echo "成功 (HTTP $HTTP_CODE)"
+            else
+              echo "失败 (HTTP $HTTP_CODE)"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          done
+
+          echo "========================"
+          if [ $FAIL_COUNT -gt 0 ]; then
+            echo "共有 $FAIL_COUNT 个链接访问异常！"
+            exit 1
+          else
+            echo "所有链接均正常响应！"
+          fi
