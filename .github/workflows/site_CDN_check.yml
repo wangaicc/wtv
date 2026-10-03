@@ -2,7 +2,7 @@ name: Scheduled Site Ping
 
 on:
   schedule:
-    - cron: '0 0 */2 * *'
+    - cron: '0 0 1 * *'
   workflow_dispatch:
 
 jobs:
@@ -40,7 +40,7 @@ jobs:
           done
 
           echo "========================"
-          if [ $FAIL_COUNT -gt 0 ]; then
+          if [ "$FAIL_COUNT" -gt 0 ]; then
             echo "共有 $FAIL_COUNT 个链接访问异常！"
             exit 1
           else
