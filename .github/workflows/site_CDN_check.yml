@@ -1,48 +1,127 @@
-name: Scheduled Site Ping
+name: Cold Cache Warmup
 
 on:
-  schedule:
-    - cron: '0 0 */2 * *'
   workflow_dispatch:
+  schedule:
+    - cron: '0 19 */2 * *'
 
 jobs:
-  ping-websites:
+  warmup:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check URLs Availability
+      - name: 1. 安装 Python 依赖环境
         run: |
-          URLS=(
-            "https://www.zjdhh.com"
-            "https://www.zjdhh.com/product/"
-            "https://www.zjdhh.com/serial"
-          )
+          python -m pip install --upgrade pip
+          pip install requests
 
-          USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      - name: 2. 读取 Sitemap 并执行预热
+        env:
+          SITEMAP_URL: ${{ secrets.sitemap }}
+          TARGET_HOST: ${{ secrets.host }}
+        run: |
+          python - << 'EOF'
+          import os
+          import sys
+          import time
+          import random
+          import requests
+          import xml.etree.ElementTree as ET
 
-          FAIL_COUNT=0
+          sitemap_url = os.environ.get('SITEMAP_URL')
+          target_host = os.environ.get('TARGET_HOST', '').strip()
 
-          echo "=== 开始请求站点 ==="
-          for url in "${URLS[@]}"; do
-            echo -n "正在请求: $url ... "
-            
-            HTTP_CODE=$(curl -s -o /dev/null -L -w "%{http_code}" \
-              -A "$USER_AGENT" \
-              --connect-timeout 10 \
-              --max-time 15 \
-              "$url")
+          if not sitemap_url:
+              print("❌ 错误: 未找到 secrets.sitemap 变量！")
+              sys.exit(1)
 
-            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
-              echo "成功 (HTTP $HTTP_CODE)"
-            else
-              echo "失败 (HTTP $HTTP_CODE)"
-              FAIL_COUNT=$((FAIL_COUNT + 1))
-            fi
-          done
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+              'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+              'Accept-Encoding': 'gzip, deflate, br',
+              'Cache-Control': 'no-cache',
+              'Pragma': 'no-cache',
+              'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+              'Sec-Ch-Ua-Mobile': '?0',
+              'Sec-Ch-Ua-Platform': '"Windows"',
+              'Sec-Fetch-Dest': 'document',
+              'Sec-Fetch-Mode': 'navigate',
+              'Sec-Fetch-Site': 'none',
+              'Sec-Fetch-User': '?1',
+              'Upgrade-Insecure-Requests': '1'
+          }
 
-          echo "========================"
-          if [ "$FAIL_COUNT" -gt 0 ]; then
-            echo "共有 $FAIL_COUNT 个链接访问异常！"
-            exit 1
-          else
-            echo "所有链接均正常响应！"
-          fi
+          print("🔍 正在获取 Sitemap 页面列表...")
+          try:
+              res = requests.get(sitemap_url, headers=headers, timeout=15)
+              res.raise_for_status()
+              root = ET.fromstring(res.content)
+              
+              namespace = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+              all_urls = [elem.text for elem in root.findall('.//ns:loc', namespace)]
+              
+              if not all_urls:
+                  all_urls = [elem.text for elem in root.findall('.//loc')]
+
+              protocol = "https://" if sitemap_url.startswith("https://") else "http://"
+              base_url = f"{protocol}{target_host}".rstrip('/')
+
+              must_have_targets = [
+                  base_url,
+                  f"{base_url}/product/",
+                  f"{base_url}/serial/"
+              ]
+
+              mandatory_selected = []
+              remaining_pool = []
+
+              for url in all_urls:
+                  norm_url = url.rstrip('/')
+                  if any(norm_url == target.rstrip('/') for target in must_have_targets):
+                      if url not in mandatory_selected:
+                          mandatory_selected.append(url)
+                  else:
+                      remaining_pool.append(url)
+
+              for target in [f"{base_url}/", f"{base_url}/product/", f"{base_url}/serial/"]:
+                  if not any(target.rstrip('/') == m.rstrip('/') for m in mandatory_selected):
+                      mandatory_selected.append(target)
+
+              needed_count = max(0, 50 - len(mandatory_selected))
+              random_selected = random.sample(remaining_pool, min(needed_count, len(remaining_pool)))
+
+              final_urls = mandatory_selected + random_selected
+              total = len(final_urls)
+
+              print(f"🎉 页面准备完毕: 核心必含页面 {len(mandatory_selected)} 个，随机抽取页面 {len(random_selected)} 个。")
+              print(f"🚀 开始慢速预热（共 {total} 页，每页间隔 10~30 秒）...\n")
+
+              for idx, url in enumerate(final_urls, 1):
+                  try:
+                      res = requests.get(url, headers=headers, timeout=15)
+                      masked_url = url
+                      if target_host:
+                          masked_url = masked_url.replace(target_host, 'google.com')
+                          raw_domain = target_host.replace('www.', '')
+                          masked_url = masked_url.replace(raw_domain, 'google.com')
+                      
+                      print(f"[{res.status_code}] ({idx}/{total}) 预热成功: {masked_url}")
+                  except Exception as e:
+                      masked_url = url
+                      if target_host:
+                          masked_url = masked_url.replace(target_host, 'google.com')
+                          raw_domain = target_host.replace('www.', '')
+                          masked_url = masked_url.replace(raw_domain, 'google.com')
+                      print(f"[FAIL] ({idx}/{total}) 预热失败 {masked_url}: {e}")
+
+                  if idx < total:
+                      sleep_time = random.uniform(10.0, 30.0)
+                      time.sleep(sleep_time)
+
+              print("\n✅ 冷缓存慢速预热完全结束！")
+
+          except Exception as e:
+              print(f"❌ 读取或解析 Sitemap 失败: {e}")
+              sys.exit(1)
+          EOF
