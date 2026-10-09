@@ -17,7 +17,7 @@ jobs:
 
       - name: 2. 读取 Sitemap 并执行预热
         env:
-          SITEMAP_URL: ${{ secrets.sitemap }}
+          SITEMAP_URL: ${{ secrets.SITEAP }}
           TARGET_HOST: ${{ secrets.host }}
         run: |
           python - << 'EOF'
