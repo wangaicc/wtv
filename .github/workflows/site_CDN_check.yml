@@ -122,4 +122,58 @@ jobs:
                   if not any(target.rstrip('/') == m.rstrip('/') for m in mandatory_selected):
                       mandatory_selected.append(target)
 
-              needed
+              needed_count = max(0, 50 - len(mandatory_selected))
+
+              if len(candidate_pool) < needed_count:
+                  print(f"⚠️ 30天内未访问候选池不足 ({len(candidate_pool)} < {needed_count})，将从全量未访问及已冷却池中抽取。")
+                  candidate_pool = [u for u in all_urls if not any(u.rstrip('/') == target.rstrip('/') for target in must_have_targets)]
+
+              random_selected = random.sample(candidate_pool, min(needed_count, len(candidate_pool)))
+
+              final_urls = mandatory_selected + random_selected
+              total = len(final_urls)
+
+              for u in final_urls:
+                  cursor.execute('''
+                      INSERT INTO warmup_history (url, weight, selected_at)
+                      VALUES (?, 1, ?)
+                      ON CONFLICT(url) DO UPDATE SET
+                          weight = weight + 1,
+                          selected_at = excluded.selected_at
+                  ''', (u, current_time))
+              conn.commit()
+
+              masked_urls_list = [mask_url(u) for u in final_urls]
+              print(f"🎉 成功提取并准备好 {total} 个页面：")
+              print(f"📋 预热页面列表（域名已打码）: {masked_urls_list}\n")
+
+              print(f"🚀 开始慢速预热（共 {total} 页，每页间隔 10~30 秒）...\n")
+
+              for idx, url in enumerate(final_urls, 1):
+                  display_url = mask_url(url)
+                  try:
+                      res = requests.get(url, headers=headers, timeout=15)
+                      print(f"[{res.status_code}] ({idx}/{total}) 预热成功: {display_url}", flush=True)
+                  except Exception as e:
+                      print(f"[FAIL] ({idx}/{total}) 预热失败 {display_url}: {e}", flush=True)
+
+                  if idx < total:
+                      sleep_time = random.uniform(10.0, 30.0)
+                      time.sleep(sleep_time)
+
+              print("\n✅ 冷缓存慢速预热完全结束！")
+
+          except Exception as e:
+              print(f"❌ 读取或解析 Sitemap 失败: {e}")
+              sys.exit(1)
+          finally:
+              conn.close()
+          EOF
+
+      - name: 3. 保存更新后的 SQLite 数据库至 Git 仓库
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add warmup_history.db
+          git commit -m "chore: update warmup sqlite db history [skip ci]" || exit 0
+          git push origin HEAD:${{ github.ref_name }}
