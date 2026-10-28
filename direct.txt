@@ -1,4 +1,5 @@
 payload:
+  - 'basbax.934676.xyz'
   - 'bdaqqba.459236.xyz'
   - 'dgadgsa.934676.xyz'
   - 'dsavaa.459236.xyz'
@@ -6,6 +7,8 @@ payload:
   - 'feiniaoyun.xyz'
   - 'github.com'
   - 'hdsbsdb.934676.xyz'
+  - 'rgahas.934676.xyz'
+  - 'rgavwee.934676.xyz'
   - 't.me'
   - 'tdbsfbsb.934676.xyz'
   - 'vfdvcav.459236.xyz'
