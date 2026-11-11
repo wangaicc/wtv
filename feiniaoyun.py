@@ -53,7 +53,6 @@ def build_driver() -> webdriver.Chrome:
     driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()), options=chrome_options
     )
-    # 抹掉 navigator.webdriver 特征
     driver.execute_cdp_cmd(
         "Page.addScriptToEvaluateOnNewDocument",
         {
@@ -66,7 +65,6 @@ def build_driver() -> webdriver.Chrome:
 
 
 def find_first(driver, selectors, timeout=15, clickable=False):
-    """在多个候选选择器里找到第一个可用元素。"""
     end = time.time() + timeout
     cond = (
         EC.element_to_be_clickable
@@ -77,10 +75,9 @@ def find_first(driver, selectors, timeout=15, clickable=False):
     while time.time() < end:
         for css in selectors:
             try:
-                el = WebDriverWait(driver, 2).until(
+                return WebDriverWait(driver, 2).until(
                     cond((By.CSS_SELECTOR, css))
                 )
-                return el
             except Exception as e:
                 last_err = e
         time.sleep(0.3)
@@ -90,18 +87,16 @@ def find_first(driver, selectors, timeout=15, clickable=False):
 
 
 def dump_debug(driver, tag: str) -> None:
-    """打印页面关键信息，便于排查。"""
     try:
         print(f"[DEBUG {tag}] url={driver.current_url}")
         print(f"[DEBUG {tag}] title={driver.title!r}")
-        print(
-            f"[DEBUG {tag}] body_len="
-            f"{len(driver.find_element(By.TAG_NAME, 'body').text or '')}"
-        )
+        body_text = driver.find_element(By.TAG_NAME, "body").text or ""
+        print(f"[DEBUG {tag}] body_len={len(body_text)}")
         print(
             f"[DEBUG {tag}] inputs="
             f"{len(driver.find_elements(By.TAG_NAME, 'input'))}"
         )
+        print(f"[DEBUG {tag}] body_preview={body_text[:300]!r}")
     except Exception as e:
         print(f"[DEBUG {tag}] 读取页面信息失败: {e}")
 
@@ -111,7 +106,6 @@ try:
     driver.get(BASE_URL)
     wait = WebDriverWait(driver, 15)
 
-    # 等页面 readyState 完成
     try:
         WebDriverWait(driver, 20).until(
             lambda d: d.execute_script("return document.readyState")
@@ -123,7 +117,7 @@ try:
     time.sleep(2)
     dump_debug(driver, "登录页")
 
-    # ===== 登录：邮箱 =====
+    # ===== 邮箱 =====
     email_selectors = [
         'input[type="email"]',
         'input[name="email"]',
@@ -139,7 +133,7 @@ try:
     email_input.send_keys(EMAIL)
     print("[INFO] 邮箱已输入")
 
-    # ===== 登录：密码 =====
+    # ===== 密码 =====
     password_selectors = [
         'input[type="password"]',
         'input[name="password"]',
@@ -163,11 +157,15 @@ try:
         password_input.send_keys(Keys.RETURN)
     print("[INFO] 已提交登录")
 
-    # 等登录成功：URL 变化 或 出现登出/用户元素
+    # ===== 等登录成功 =====
     try:
         WebDriverWait(driver, 20).until(
             lambda d: "/login" not in d.current_url.lower()
-            or len(d.find_elements(By.CSS_SELECTOR, ".ant-avatar, .user-info"))
+            or len(
+                d.find_elements(
+                    By.CSS_SELECTOR, ".ant-avatar, .user-info"
+                )
+            )
             > 0
         )
         print(f"[INFO] 登录后 URL: {driver.current_url}")
@@ -177,7 +175,7 @@ try:
 
     time.sleep(2)
 
-    # ===== 关闭可能的弹窗 =====
+    # ===== 关闭弹窗 =====
     try:
         close_btn = WebDriverWait(driver, 5).until(
             EC.presence_of_element_located(
@@ -189,7 +187,7 @@ try:
     except Exception:
         pass
 
-    # ===== 打开订阅快捷面板 =====
+    # ===== 快捷面板 =====
     shortcut_selectors = [
         ".v2board-shortcuts-item:nth-child(2) > div:nth-child(1)",
         ".v2board-shortcuts-item:nth-child(2)",
@@ -201,17 +199,19 @@ try:
     driver.execute_script("arguments[0].click();", shortcut_item)
     time.sleep(2)
 
-    # ===== 关闭居中的 modal（点击遮罩） =====
+    # ===== 关闭居中 modal =====
     try:
         modal_centered = WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".ant-modal-centered"))
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, ".ant-modal-centered")
+            )
         )
         driver.execute_script("arguments[0].click();", modal_centered)
         time.sleep(2)
     except Exception:
         pass
 
-    # ===== 点击“订阅链接” =====
+    # ===== 订阅按钮 =====
     subscribe_selectors = [
         ".subsrcibe-for-link > div:nth-child(2)",
         ".subscribe-for-link > div:nth-child(2)",
@@ -221,7 +221,6 @@ try:
         driver, subscribe_selectors, timeout=15, clickable=True
     )
 
-    # 点击前先清空性能日志，避免错过请求
     try:
         driver.get_log("performance")
     except Exception:
@@ -230,7 +229,7 @@ try:
     driver.execute_script("arguments[0].click();", subscribe_element)
     print("[INFO] 已点击订阅按钮，开始抓包…")
 
-    # ===== 轮询性能日志，抓订阅链接 =====
+    # ===== 轮询抓包 =====
     copied_text = ""
     deadline = time.time() + 15
     while time.time() < deadline and not copied_text:
@@ -247,13 +246,18 @@ try:
                 url = message["params"]["response"]["url"]
                 if not any(
                     k in url
-                    for k in ("subscribe", "user/getSubscribe", "user/info")
+                    for k in (
+                        "subscribe",
+                        "user/getSubscribe",
+                        "user/info",
+                    )
                 ):
                     continue
                 request_id = message["params"]["requestId"]
                 try:
                     body = driver.execute_cdp_cmd(
-                        "Network.getResponseBody", {"requestId": request_id}
+                        "Network.getResponseBody",
+                        {"requestId": request_id},
                     )
                     data = json.loads(body["body"])
                 except Exception:
@@ -273,7 +277,7 @@ try:
                     ):
                         copied_text = payload
                 if copied_text:
-                    print(f"[INFO] 从网络响应抓到订阅链接")
+                    print("[INFO] 从网络响应抓到订阅链接")
                     break
             except Exception:
                 continue
@@ -281,7 +285,7 @@ try:
         if not copied_text:
             time.sleep(0.5)
 
-    # ===== 兜底：DOM 中找 data-clipboard-text / window 变量 =====
+    # ===== 兜底 DOM =====
     if not copied_text:
         try:
             copied_text = driver.execute_script(
@@ -299,14 +303,16 @@ try:
 
     if not copied_text or not str(copied_text).startswith("http"):
         dump_debug(driver, "抓取失败")
-        raise RuntimeError(f"未能获取订阅链接，当前值: {copied_text!r}")
+        raise RuntimeError(
+            f"未能获取订阅链接，当前值: {copied_text!r}"
+        )
 
     print("[INFO] 订阅链接获取成功")
 
     # ===== 加密 =====
     encrypted_text = encrypt_text(str(copied_text), KEY)
 
-    # ===== 目录处理 =====
+    # ===== 目录 =====
     os.makedirs("feiniaoyun", exist_ok=True)
 
     for old_file in glob.glob("feiniaoyun/*.txt"):
@@ -337,9 +343,16 @@ try:
 
 except Exception as e:
     print(f"执行出现错误: {e}")
+    # 关键：截图必须在 driver.quit() 之前
     try:
         driver.save_screenshot("error.png")
         print("[INFO] 已保存 error.png")
+        print(
+            f"[INFO] error.png 是否存在: "
+            f"{os.path.exists('error.png')}, "
+            f"大小: "
+            f"{os.path.getsize('error.png') if os.path.exists('error.png') else 0}"
+        )
     except Exception as shot_err:
         print(f"保存截图失败: {shot_err}")
     raise e
