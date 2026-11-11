@@ -33,14 +33,14 @@ jobs:
         APP_KEY: ${{ secrets.APP_KEY }}
       run: python feiniaoyun.py
 
-    # 失败时上传 error.png，方便你在 Actions 页面直接下载查看
+    # 无论成功失败都上传，方便确认到底有没有生成
     - name: Upload error screenshot
-      if: failure()
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: error-screenshot
         path: error.png
-        if-no-files-found: ignore
+        if-no-files-found: warn
 
     - name: Commit and Push to Repository
       if: success()
@@ -62,3 +62,4 @@ jobs:
       with:
         name: subscribe-link-file
         path: feiniaoyun/
+        if-no-files-found: warn
