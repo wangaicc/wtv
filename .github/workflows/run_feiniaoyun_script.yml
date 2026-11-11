@@ -5,6 +5,9 @@ on:
     - cron: '0 19 */2 * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   run-script:
     runs-on: ubuntu-latest
@@ -30,14 +33,31 @@ jobs:
         APP_KEY: ${{ secrets.APP_KEY }}
       run: python feiniaoyun.py
 
+    # 失败时上传 error.png，方便你在 Actions 页面直接下载查看
+    - name: Upload error screenshot
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: error-screenshot
+        path: error.png
+        if-no-files-found: ignore
+
     - name: Commit and Push to Repository
+      if: success()
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git add feiniaoyun/
-        git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update feiniaoyun subscription and logs" && git push)
+        if git diff --staged --quiet; then
+          echo "没有变化，跳过提交"
+        else
+          git commit -m "Auto update feiniaoyun subscription and logs"
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
+          git push
+        fi
 
     - name: Upload subscribe link file
+      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: subscribe-link-file
