@@ -24,7 +24,8 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install selenium webdriver-manager
+        # 必须安装 undetected-chromedriver，去掉不再需要的 webdriver-manager
+        pip install undetected-chromedriver selenium
 
     - name: Run Python Selenium Script
       env:
