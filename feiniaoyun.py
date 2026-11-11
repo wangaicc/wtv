@@ -5,14 +5,11 @@ import os
 import time
 from datetime import datetime
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
 
 EMAIL = os.environ.get("APP_EMAIL", "")
 PASSWORD = os.environ.get("APP_PASSWORD", "")
@@ -30,36 +27,17 @@ def encrypt_text(text: str, key: str) -> str:
     return base64.b64encode(xor_bytes).decode("utf-8")
 
 
-def build_driver() -> webdriver.Chrome:
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--screen-info={0,0 1920x1080}")
-    chrome_options.add_argument("--lang=zh-CN")
-    chrome_options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
-    chrome_options.add_experimental_option(
-        "excludeSwitches", ["enable-automation"]
-    )
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()), options=chrome_options
-    )
-    driver.execute_cdp_cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        {
-            "source": "Object.defineProperty(navigator, 'webdriver', "
-            "{get: () => undefined})"
-        },
-    )
+def build_driver() -> uc.Chrome:
+    options = uc.ChromeOptions()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--lang=zh-CN")
+    
+    # 启用 undetected-chromedriver 自动绕过 Cloudflare 检测
+    driver = uc.Chrome(options=options, use_subprocess=True)
     driver.set_window_size(1920, 1080)
     return driver
 
@@ -81,7 +59,7 @@ def find_first(driver, selectors, timeout=15, clickable=False):
             except Exception as e:
                 last_err = e
         time.sleep(0.3)
-    raise TimeoutException(
+    raise RuntimeError(
         f"未找到任一选择器: {selectors}; 最后错误: {last_err}"
     )
 
@@ -123,7 +101,7 @@ try:
         'input[name="email"]',
         'input[placeholder*="邮箱"]',
         'input[placeholder*="email"]',
-        ".form-group:nth-child(2) > .form-control",
+        '.form-group:nth-child(2) > .form-control',
         'form input:not([type="password"])',
     ]
     email_input = find_first(
@@ -138,7 +116,7 @@ try:
         'input[type="password"]',
         'input[name="password"]',
         'input[placeholder*="密码"]',
-        ".form-group:nth-child(3) > .form-control",
+        '.form-group:nth-child(3) > .form-control',
     ]
     password_input = find_first(
         driver, password_selectors, timeout=10, clickable=True
@@ -343,7 +321,6 @@ try:
 
 except Exception as e:
     print(f"执行出现错误: {e}")
-    # 关键：截图必须在 driver.quit() 之前
     try:
         driver.save_screenshot("error.png")
         print("[INFO] 已保存 error.png")
