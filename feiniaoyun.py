@@ -36,8 +36,12 @@ def build_driver() -> uc.Chrome:
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--lang=zh-CN")
     
-    # 启用 undetected-chromedriver 自动绕过 Cloudflare 检测
-    driver = uc.Chrome(options=options, use_subprocess=True)
+    # 显式指定 version_main 匹配 GitHub Actions 虚拟机的 Chrome 版本，带降级兜底
+    try:
+        driver = uc.Chrome(options=options, use_subprocess=True, version_main=156)
+    except Exception:
+        driver = uc.Chrome(options=options, use_subprocess=True)
+        
     driver.set_window_size(1920, 1080)
     return driver
 
