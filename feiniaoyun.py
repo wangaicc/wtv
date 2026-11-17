@@ -245,7 +245,7 @@ def extract_from_payload(data):
 
 def grab_subscribe(page):
     try:
-        close_btn = page.locator(".ant-modal-close-x, .modal-close").first
+        close_btn = page.locator(".ant-modal-close-x").first
         if close_btn.count() > 0:
             close_btn.click(timeout=5000)
             page.wait_for_timeout(800)
