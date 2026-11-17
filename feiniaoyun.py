@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from urllib.parse import urlparse
@@ -31,6 +32,8 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+HTTP_TIMEOUT = 20
+SUBSCRIPTION_PATH = "/api/v1/user/getSubscribe"
 
 EMAIL_CSS = ", ".join([
     'input[type="email"]',
@@ -46,28 +49,25 @@ PASSWORD_CSS = ", ".join([
     'input[placeholder*="密码"]',
     '.form-group:nth-child(3) > .form-control',
 ])
-LOGIN_CSS = ", ".join([
-    ".ant-avatar",
-    ".user-info",
-    ".v2board-shortcuts-item",
-    "[class*='subscri']",
-])
 FAIL_CSS = ", ".join([
     ".ant-message-error",
     ".ant-alert-error",
     ".ant-form-item-explain-error",
     ".error-message",
 ])
-SHORTCUT_CSS = ", ".join([
-    ".v2board-shortcuts-item:nth-child(2) > div:nth-child(1)",
-    ".v2board-shortcuts-item:nth-child(2)",
-    ".v2board-shortcuts-item",
-])
-SUBSCRIBE_CSS = ", ".join([
-    ".subsrcibe-for-link > div:nth-child(2)",
-    ".subscribe-for-link > div:nth-child(2)",
-    "[class*='subscri']",
-])
+OVERLAY_CSS = """
+#crisp-chatbox, .crisp-client, [id^="crisp"], [class*="crisp"],
+[id*="kefu"], [class*="kefu"], iframe[src*="crisp"], iframe[src*="gptkefu"],
+[id*="gptkefu"], [class*="gptkefu"] {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+}
+"""
+
+
+class CredentialRejected(Exception):
+    pass
 
 
 def fetch_readme():
@@ -137,15 +137,118 @@ def encrypt_text(text, key):
     return base64.b64encode(xor_bytes).decode("utf-8")
 
 
+def api_call(base, path, method="GET", payload=None, token=None, timeout=HTTP_TIMEOUT):
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+        "Referer": base + "/",
+        "Origin": base,
+    }
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = token
+    req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            return resp.status, body
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", errors="replace")
+
+
+def extract_from_payload(data):
+    if not isinstance(data, dict):
+        return ""
+    payload = data.get("data")
+    if isinstance(payload, dict):
+        return payload.get("subscribe_url") or payload.get("url") or payload.get("link") or ""
+    if isinstance(payload, str) and payload.startswith("http"):
+        return payload
+    return ""
+
+
+def api_login(base):
+    status, body = api_call(
+        base,
+        "/api/v1/passport/auth/login",
+        method="POST",
+        payload={"email": EMAIL, "password": PASSWORD},
+    )
+    try:
+        data = json.loads(body)
+    except Exception:
+        raise RuntimeError(f"登录接口返回非 JSON (status={status})")
+    if status == 422 and isinstance(data.get("errors"), dict):
+        errors = json.dumps(data.get("errors"), ensure_ascii=False)[:120]
+        raise CredentialRejected(f"登录参数被拒 (422): {errors}")
+    if status != 200:
+        message = str(data.get("message") or body[:120])
+        lowered = message.lower()
+        if "密码" in message or "账号" in message or "credentials" in lowered or "invalid" in lowered:
+            raise CredentialRejected(f"登录被拒 (status={status}): {message}")
+        raise RuntimeError(f"登录失败 (status={status}): {message}")
+    payload = data.get("data") or {}
+    auth_values = []
+    for key in ("auth_data", "authData", "token"):
+        value = payload.get(key)
+        if value:
+            auth_values.append(str(value))
+    if not auth_values:
+        raise RuntimeError(f"登录成功但无鉴权字段，字段: {sorted((payload or {}).keys())}")
+    print(f"[INFO] HTTP 登录成功，返回字段: {sorted((payload or {}).keys())}")
+    return auth_values
+
+
+def api_subscribe(base, auth_values):
+    for value in auth_values:
+        for auth in (value, f"Bearer {value}"):
+            status, body = api_call(base, SUBSCRIPTION_PATH, token=auth)
+            if status != 200:
+                print(f"[DEBUG] getSubscribe status={status} auth_len={len(auth)}")
+                continue
+            try:
+                data = json.loads(body)
+            except Exception:
+                continue
+            subscribe_url = extract_from_payload(data)
+            if subscribe_url:
+                return subscribe_url
+    raise RuntimeError("getSubscribe 未返回订阅链接")
+
+
+def try_http(candidates):
+    for base in candidates:
+        try:
+            auth_values = api_login(base)
+            subscribe_url = api_subscribe(base, auth_values)
+            print(f"[HTTP OK] {base} 取到订阅链接")
+            return base, subscribe_url
+        except CredentialRejected:
+            raise
+        except Exception as exc:
+            print(f"[HTTP FAIL] {base} -> {type(exc).__name__}: {exc}")
+            continue
+    return None, None
+
+
 def dump_page(page, tag):
     try:
         print(f"[DEBUG {tag}] url={page.url}")
         print(f"[DEBUG {tag}] title={page.title()!r}")
         body = page.evaluate("() => document.body ? document.body.innerText : ''") or ""
-        print(f"[DEBUG {tag}] body_len={len(body)}")
         print(f"[DEBUG {tag}] body_preview={body[:200]!r}")
     except Exception as exc:
         print(f"[DEBUG {tag}] 读取页面信息失败: {exc}")
+
+
+def hide_overlays(page):
+    try:
+        page.add_style_tag(content=OVERLAY_CSS)
+    except Exception:
+        pass
 
 
 def looks_like_cloudflare(page):
@@ -180,7 +283,27 @@ def fill_field(page, css, value, label):
     print(f"[INFO] {label}已输入")
 
 
-def do_login(page, base_url):
+def page_fetch_subscribe(page):
+    try:
+        return page.evaluate(
+            """async () => {
+                try {
+                    const r = await fetch('/api/v1/user/getSubscribe', {credentials: 'include'});
+                    if (r.status !== 200) return {status: r.status, url: ''};
+                    const j = await r.json();
+                    const d = (j && j.data) || {};
+                    const url = d.subscribe_url || d.url || d.link || '';
+                    return {status: 200, url: url};
+                } catch (e) {
+                    return {status: 0, url: '', err: String(e).slice(0, 80)};
+                }
+            }"""
+        )
+    except Exception as exc:
+        return {"status": 0, "url": "", "err": str(exc)[:80]}
+
+
+def browser_flow(page, base_url):
     try:
         page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
     except PlaywrightTimeoutError:
@@ -188,16 +311,9 @@ def do_login(page, base_url):
     except Exception as exc:
         raise RuntimeError(f"页面加载失败: {type(exc).__name__}: {str(exc)[:100]}")
 
+    hide_overlays(page)
     page.wait_for_timeout(2500)
     dump_page(page, "登录页")
-
-    title = ""
-    try:
-        title = page.title() or ""
-    except Exception:
-        title = ""
-    if "404" in page.url.lower() or "not found" in title.lower() or "页面不存在" in title:
-        raise RuntimeError("域名指向 404 页面")
 
     if looks_like_cloudflare(page):
         print("[WARN] 检测到 Cloudflare 验证页，等待自动放行…")
@@ -207,8 +323,8 @@ def do_login(page, base_url):
                 break
         if looks_like_cloudflare(page):
             raise RuntimeError("Cloudflare 验证页未通过，跳过该域名")
-        print("[INFO] Cloudflare 验证已通过")
 
+    hide_overlays(page)
     fill_field(page, EMAIL_CSS, EMAIL, "邮箱")
     fill_field(page, PASSWORD_CSS, PASSWORD, "密码")
 
@@ -222,97 +338,79 @@ def do_login(page, base_url):
         page.keyboard.press("Enter")
     print("[INFO] 已提交登录")
 
-    try:
-        page.locator(LOGIN_CSS).first.wait_for(state="visible", timeout=25000)
-        print(f"[INFO] 登录后 URL: {page.url}")
-    except PlaywrightTimeoutError:
-        dump_page(page, "登录后")
+    deadline = time.time() + 30
+    last_status = 0
+    while time.time() < deadline:
+        result = page_fetch_subscribe(page)
+        last_status = result.get("status", 0)
+        if last_status == 200 and result.get("url"):
+            print("[INFO] 登录态已建立，getSubscribe 返回订阅链接")
+            return result["url"]
         if page.locator(FAIL_CSS).count() > 0:
-            raise RuntimeError("登录失败：页面出现错误提示")
-        raise RuntimeError("登录疑似失败：未出现用户元素")
+            dump_page(page, "登录失败")
+            raise CredentialRejected("页面出现登录错误提示（账号或密码被拒）")
+        page.wait_for_timeout(1000)
+
+    dump_page(page, "取订阅超时")
+    raise RuntimeError(f"登录后 getSubscribe 未返回订阅链接 (last_status={last_status})")
 
 
-def extract_from_payload(data):
-    if not isinstance(data, dict):
-        return ""
-    payload = data.get("data")
-    if isinstance(payload, dict):
-        return payload.get("subscribe_url") or payload.get("url") or payload.get("link") or ""
-    if isinstance(payload, str) and payload.startswith("http"):
-        return payload
-    return ""
-
-
-def grab_subscribe(page):
+def try_browser(pw, candidates):
+    failures = []
+    browser = pw.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--lang=zh-CN",
+        ],
+    )
     try:
-        close_btn = page.locator(".ant-modal-close-x").first
-        if close_btn.count() > 0:
-            close_btn.click(timeout=5000)
-            page.wait_for_timeout(800)
-    except Exception:
-        pass
-
-    shortcut = page.locator(SHORTCUT_CSS).first
-    try:
-        shortcut.wait_for(state="visible", timeout=15000)
-    except PlaywrightTimeoutError:
-        raise RuntimeError("未找到快捷面板入口")
-    shortcut.click()
-    page.wait_for_timeout(2000)
-
-    try:
-        modal = page.locator(".ant-modal-centered").first
-        if modal.count() > 0:
-            modal.click(timeout=5000)
-            page.wait_for_timeout(2000)
-    except Exception:
-        pass
-
-    subscribe = page.locator(SUBSCRIBE_CSS).first
-    try:
-        subscribe.wait_for(state="visible", timeout=15000)
-    except PlaywrightTimeoutError:
-        raise RuntimeError("未找到订阅按钮")
-
-    copied_text = ""
-    try:
-        with page.expect_response(
-            lambda r: ("subscribe" in r.url.lower()) or ("user/info" in r.url.lower()),
-            timeout=15000,
-        ) as resp_info:
-            subscribe.click()
-        response = resp_info.value
+        for index, base_url in enumerate(candidates, 1):
+            print(f"\n[BROWSER TRY {index}/{len(candidates)}] {base_url}")
+            context = browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                locale="zh-CN",
+                user_agent=USER_AGENT,
+                ignore_https_errors=True,
+            )
+            page = context.new_page()
+            page.set_default_timeout(15000)
+            page.set_default_navigation_timeout(30000)
+            try:
+                subscribe_url = browser_flow(page, base_url)
+                print(f"[BROWSER OK] {base_url} 取到订阅链接")
+                return base_url, subscribe_url
+            except CredentialRejected:
+                try:
+                    page.screenshot(path=f"error_{index}.png")
+                except Exception:
+                    pass
+                raise
+            except Exception as exc:
+                failures.append((base_url, f"{type(exc).__name__}: {exc}"))
+                print(f"[BROWSER FAIL] {base_url} -> {type(exc).__name__}: {exc}")
+                try:
+                    page.screenshot(path=f"error_{index}.png")
+                except Exception:
+                    pass
+                continue
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+    finally:
         try:
-            data = response.json()
+            browser.close()
         except Exception:
-            data = {}
-        copied_text = extract_from_payload(data)
-        if copied_text:
-            print("[INFO] 从网络响应抓到订阅链接")
-    except PlaywrightTimeoutError:
-        print("[WARN] 未捕获订阅接口响应，尝试页面兜底提取")
-
-    if not copied_text:
-        try:
-            copied_text = page.evaluate(
-                """() => {
-                    const els = document.querySelectorAll('*');
-                    for (const el of els) {
-                        const t = el.getAttribute('data-clipboard-text');
-                        if (t && t.indexOf('http') === 0) return t;
-                    }
-                    return window.subscribe_url || '';
-                }"""
-            ) or ""
-        except Exception:
-            copied_text = ""
-
-    if not copied_text or not str(copied_text).startswith("http"):
-        dump_page(page, "抓取失败")
-        raise RuntimeError(f"未能获取订阅链接，当前值: {str(copied_text)!r}")
-
-    print("[INFO] 订阅链接获取成功")
-    return str(copied_text)
+            pass
+    print("\n[ERROR] Playwright 通道全部域名失败：")
+    for url, reason in failures:
+        print(f"  - {url}: {reason}")
+    return None, None
 
 
 def save_result(encrypted_text):
@@ -356,67 +454,30 @@ def main():
         print("[ERROR] 无可用域名，任务终止")
         return 1
 
-    subscribe_url = ""
     used_url = ""
-    failures = []
+    subscribe_url = ""
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--lang=zh-CN",
-            ],
-        )
-        try:
-            for index, base_url in enumerate(candidates, 1):
-                print(f"\n[TRY {index}/{len(candidates)}] {base_url}")
-                context = browser.new_context(
-                    viewport={"width": 1920, "height": 1080},
-                    locale="zh-CN",
-                    user_agent=USER_AGENT,
-                    ignore_https_errors=True,
-                )
-                page = context.new_page()
-                page.set_default_timeout(15000)
-                page.set_default_navigation_timeout(30000)
-                try:
-                    do_login(page, base_url)
-                    subscribe_url = grab_subscribe(page)
-                    used_url = base_url
-                    print(f"[SUCCESS] {base_url} 全流程成功，停止轮询")
-                    break
-                except Exception as exc:
-                    failures.append((base_url, f"{type(exc).__name__}: {exc}"))
-                    print(f"[FAIL] {base_url} -> {type(exc).__name__}: {exc}")
-                    try:
-                        page.screenshot(path=f"error_{index}.png", full_page=False)
-                    except Exception:
-                        pass
-                    continue
-                finally:
-                    try:
-                        context.close()
-                    except Exception:
-                        pass
-        finally:
-            try:
-                browser.close()
-            except Exception:
-                pass
+    try:
+        print("[STAGE 1] HTTP 直连接口通道")
+        used_url, subscribe_url = try_http(candidates)
+    except CredentialRejected as exc:
+        print(f"[FATAL] {exc}")
+        return 3
 
     if not subscribe_url:
-        print("\n[ERROR] 全部域名均失败：")
-        for url, reason in failures:
-            print(f"  - {url}: {reason}")
-        raise RuntimeError(f"{len(candidates)} 个域名全部登录/抓取失败")
+        print("[STAGE 2] Playwright 通道")
+        try:
+            with sync_playwright() as pw:
+                used_url, subscribe_url = try_browser(pw, candidates)
+        except CredentialRejected as exc:
+            print(f"[FATAL] {exc}")
+            return 3
 
-    encrypted_text = encrypt_text(subscribe_url, KEY)
-    save_result(encrypted_text)
-    print(f"[DONE] 使用域名: {used_url}")
+    if not subscribe_url:
+        raise RuntimeError(f"{len(candidates)} 个域名在 HTTP 与 Playwright 两个通道均失败")
+
+    print(f"[INFO] 订阅链接来源域名: {used_url}")
+    save_result(encrypt_text(subscribe_url, KEY))
     return 0
 
 
