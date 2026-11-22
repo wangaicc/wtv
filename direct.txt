@@ -1,10 +1,13 @@
 payload:
   - 'basbax.934676.xyz'
   - 'bdaqqba.459236.xyz'
+  - 'dfbac.934676.xyz'
+  - 'dfgsgs.934676.xyz'
   - 'dgadgsa.934676.xyz'
   - 'dsavaa.459236.xyz'
   - 'feiniaoyun.top'
   - 'feiniaoyun.xyz'
+  - 'gavacx.934676.xyz'
   - 'github.com'
   - 'hdsbsdb.934676.xyz'
   - 'rgahas.934676.xyz'
